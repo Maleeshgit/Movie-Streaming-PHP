@@ -15,6 +15,7 @@ let state = {
     selectedYear: '',
     sortBy: 'popularity.desc',
     favorites: [],
+    watchHistory: [],
     genres: [],
     allYears: [],
     isAuthenticated: !!localStorage.getItem('jwt_token'),
@@ -68,6 +69,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateAuthUI();
     if (state.isAuthenticated) {
         await loadWatchlistFromServer();
+        await loadWatchHistoryFromServer();
     }
     await loadMovies();
 });
@@ -424,12 +426,21 @@ async function loadRowCategory(category, containerId) {
         } else if (category === 'popular') {
             url = `${TMDB_BASE_URL}/movie/popular?api_key=${TMDB_API_KEY}&page=1`;
         } else if (category === 'recommendations') {
-            if (state.isAuthenticated && state.favorites.length > 0) {
-                // Fetch recommendations based on the user's random favorite movie
-                const randomFav = state.favorites[Math.floor(Math.random() * state.favorites.length)];
-                url = `${TMDB_BASE_URL}/movie/${randomFav.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`;
+            if (state.isAuthenticated) {
+                if (state.watchHistory && state.watchHistory.length > 0) {
+                    // Fetch recommendations based on the user's latest watched movie
+                    const latestWatched = state.watchHistory[0];
+                    url = `${TMDB_BASE_URL}/movie/${latestWatched.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`;
+                } else if (state.favorites && state.favorites.length > 0) {
+                    // Fallback to random favorite movie if no watch history exists yet
+                    const randomFav = state.favorites[Math.floor(Math.random() * state.favorites.length)];
+                    url = `${TMDB_BASE_URL}/movie/${randomFav.id}/recommendations?api_key=${TMDB_API_KEY}&page=1`;
+                } else {
+                    container.innerHTML = '<p class="row-empty">Watch movies or add to favorites to get recommendations!</p>';
+                    return;
+                }
             } else {
-                container.innerHTML = '<p class="row-empty">Add movies to your favorites to get recommendations!</p>';
+                container.innerHTML = '<p class="row-empty">Log in and watch movies to get recommendations!</p>';
                 return;
             }
         }
@@ -615,26 +626,36 @@ async function getMovieDetails(movieId) {
 // ===== AUTHENTICATION =====
 async function login(username, password) {
     try {
-        await new Promise(resolve => setTimeout(resolve, 500)); // simulate network delay
+        const response = await fetch('index.php?action=login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, password })
+        });
         
-        const users = JSON.parse(localStorage.getItem('cinemahub_users') || '[]');
-        const user = users.find(u => u.username.toLowerCase() === username.toLowerCase() && u.password === password);
+        if (!response.ok) {
+            const text = await response.text();
+            return { success: false, message: 'Server error: ' + (text || response.statusText) };
+        }
         
-        if (user) {
-            const token = 'mock-jwt-token-' + username;
-            localStorage.setItem('jwt_token', token);
-            localStorage.setItem('user_id', username);
-            localStorage.setItem('username', user.username);
+        const result = await response.json();
+        
+        if (result.success) {
+            localStorage.setItem('jwt_token', result.token);
+            localStorage.setItem('user_id', result.username);
+            localStorage.setItem('username', result.username);
             
             state.isAuthenticated = true;
-            state.jwtToken = token;
-            state.userId = username;
-            state.username = user.username;
+            state.jwtToken = result.token;
+            state.userId = result.username;
+            state.username = result.username;
             
             await loadWatchlistFromServer();
+            await loadWatchHistoryFromServer();
             return { success: true, message: 'Login successful' };
         } else {
-            return { success: false, message: 'Invalid username or password' };
+            return { success: false, message: result.message };
         }
     } catch (error) {
         console.error('Login error:', error);
@@ -643,32 +664,52 @@ async function login(username, password) {
 }
 
 async function register(username, email, password) {
+    // 1. Email format validation on frontend
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return { success: false, message: 'Invalid email address format (e.g. user@example.com).' };
+    }
+
+    // 2. Password format validation on frontend (Min 8 chars, 1 letter, 1 number)
+    const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
+    if (!passwordRegex.test(password)) {
+        return { success: false, message: 'Password must be at least 8 characters long and contain both letters and numbers.' };
+    }
+
     try {
-        await new Promise(resolve => setTimeout(resolve, 500)); // simulate network delay
+        const response = await fetch('index.php?action=register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username, email, password })
+        });
         
-        const users = JSON.parse(localStorage.getItem('cinemahub_users') || '[]');
-        if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
-            return { success: false, message: 'Username is already taken' };
+        if (!response.ok) {
+            const text = await response.text();
+            return { success: false, message: 'Server error: ' + (text || response.statusText) };
         }
         
-        const newUser = { username, email, password };
-        users.push(newUser);
-        localStorage.setItem('cinemahub_users', JSON.stringify(users));
+        const result = await response.json();
         
-        const token = 'mock-jwt-token-' + username;
-        localStorage.setItem('jwt_token', token);
-        localStorage.setItem('user_id', username);
-        localStorage.setItem('username', username);
-        
-        state.isAuthenticated = true;
-        state.jwtToken = token;
-        state.userId = username;
-        state.username = username;
-        
-        state.favorites = [];
-        updateFavoriteCount();
-        
-        return { success: true, message: 'Registration successful' };
+        if (result.success) {
+            localStorage.setItem('jwt_token', result.token);
+            localStorage.setItem('user_id', result.username);
+            localStorage.setItem('username', result.username);
+            
+            state.isAuthenticated = true;
+            state.jwtToken = result.token;
+            state.userId = result.username;
+            state.username = result.username;
+            
+            state.favorites = [];
+            state.watchHistory = [];
+            updateFavoriteCount();
+            
+            return { success: true, message: 'Registration successful' };
+        } else {
+            return { success: false, message: result.message };
+        }
     } catch (error) {
         console.error('Registration error:', error);
         return { success: false, message: 'Registration failed: ' + error.message };
@@ -685,17 +726,37 @@ function logout() {
     state.userId = null;
     state.username = null;
     state.favorites = [];
+    state.watchHistory = [];
+    
+    fetch('index.php?action=logout');
 }
 
 async function loadWatchlistFromServer() {
     if (!state.isAuthenticated) return;
     
     try {
-        const favs = JSON.parse(localStorage.getItem(`cinemahub_favorites_${state.username}`) || '[]');
-        state.favorites = favs;
-        updateFavoriteCount();
+        const response = await fetch('index.php?action=get_favorites');
+        const result = await response.json();
+        if (result.success) {
+            state.favorites = result.favorites || [];
+            updateFavoriteCount();
+        }
     } catch (error) {
         console.error('Error loading watchlist:', error);
+    }
+}
+
+async function loadWatchHistoryFromServer() {
+    if (!state.isAuthenticated) return;
+    
+    try {
+        const response = await fetch('index.php?action=get_watch_history');
+        const result = await response.json();
+        if (result.success) {
+            state.watchHistory = result.watchHistory || [];
+        }
+    } catch (error) {
+        console.error('Error loading watch history:', error);
     }
 }
 
@@ -704,6 +765,15 @@ function updateAuthUI() {
     const userMenu = document.getElementById('userMenu');
     const userGreeting = document.getElementById('userGreeting');
     const favoriteBtn = elements.favoriteBtn || document.getElementById('favoriteBtn');
+    const playBtn = document.getElementById('playBtn');
+    const modalPlayBtn = document.getElementById('modalPlayBtn');
+
+    const watchBtnText = state.isAuthenticated ? 
+        `<i class="fas fa-play"></i> Watch Movie` : 
+        `<i class="fas fa-play"></i> Watch Trailer`;
+
+    if (playBtn) playBtn.innerHTML = watchBtnText;
+    if (modalPlayBtn) modalPlayBtn.innerHTML = watchBtnText;
 
     if (state.isAuthenticated) {
         if (authButtons) authButtons.style.display = 'none';
@@ -742,13 +812,14 @@ function createMovieCard(movie) {
     const year = movie.release_date ? new Date(movie.release_date).getFullYear() : 'N/A';
 
     const isFavorite = state.favorites.some(fav => fav.id === movie.id);
+    const watchText = state.isAuthenticated ? 'Watch Movie' : 'Watch Trailer';
 
     card.innerHTML = `
         <div class="movie-poster">
             <img src="${posterUrl}" alt="${movie.title}" onerror="this.src='https://via.placeholder.com/220x330?text=No+Image'">
             <div class="movie-overlay">
                 <div class="overlay-buttons">
-                    <button class="overlay-btn play-btn" title="Watch Movie">
+                    <button class="overlay-btn play-btn" title="${watchText}">
                         <i class="fas fa-play"></i>
                     </button>
                     <button class="overlay-btn favorite-card-btn" title="Add to Favorites">
@@ -768,7 +839,7 @@ function createMovieCard(movie) {
                 </span>
                 <span>${year}</span>
             </div>
-            <button class="movie-badge watch-now-btn">Watch Now</button>
+            <button class="movie-badge watch-now-btn">${watchText}</button>
         </div>
     `;
 
@@ -789,7 +860,7 @@ function createMovieCard(movie) {
 }
 
 function updateFavoriteButton(card, movie) {
-    const isFavorite = state.favorites.some(fav => fav.id === movie.id);
+    const isFavorite = state.favorites.some(fav => Number(fav.id) === Number(movie.id));
     const btn = card.querySelector('.favorite-card-btn');
     btn.innerHTML = `<i class="fas fa-${isFavorite ? 'bookmark' : 'bookmark'}"></i>`;
 }
@@ -842,11 +913,11 @@ async function showMovieDetails(movieId) {
         // Buttons
         document.getElementById('modalPlayBtn').onclick = () => watchMovie(movie);
         
-        const isFavorite = state.favorites.some(fav => fav.id === movie.id);
+        const isFavorite = state.favorites.some(fav => Number(fav.id) === Number(movie.id));
         document.getElementById('modalFavoriteBtn').textContent = isFavorite ? '✓ In Favorites' : '+ Add to Favorites';
         document.getElementById('modalFavoriteBtn').onclick = () => {
             toggleFavorite(movie);
-            document.getElementById('modalFavoriteBtn').textContent = state.favorites.some(fav => fav.id === movie.id) ? '✓ In Favorites' : '+ Add to Favorites';
+            document.getElementById('modalFavoriteBtn').textContent = state.favorites.some(fav => Number(fav.id) === Number(movie.id)) ? '✓ In Favorites' : '+ Add to Favorites';
             updateFavoriteCount();
         };
 
@@ -885,29 +956,60 @@ async function watchMovie(movie) {
         const details = await getMovieDetails(movieId);
         elements.loading.classList.remove('active');
         
-        let videoKey = null;
-        if (details && details.videos && details.videos.results) {
-            const trailer = details.videos.results.find(v => v.site === 'YouTube' && v.type === 'Trailer');
-            if (trailer) {
-                videoKey = trailer.key;
-            } else if (details.videos.results.length > 0) {
-                const anyYoutube = details.videos.results.find(v => v.site === 'YouTube');
-                if (anyYoutube) videoKey = anyYoutube.key;
-            }
-        }
-        
-        if (videoKey) {
-            if (elements.videoPlayer && elements.videoModal) {
-                elements.videoPlayer.src = `https://www.youtube.com/embed/${videoKey}?autoplay=1`;
-                elements.videoModal.classList.add('active');
+        if (state.isAuthenticated) {
+            // User is logged in -> redirect to streaming link
+            if (details && details.imdb_id) {
+                // Save to watch history in DB
+                try {
+                    await fetch('index.php?action=add_watch_history', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            movie_id: details.id,
+                            title: details.title,
+                            poster_path: details.poster_path,
+                            vote_average: details.vote_average,
+                            release_date: details.release_date
+                        })
+                    });
+                    await loadWatchHistoryFromServer();
+                } catch (historyErr) {
+                    console.error('Failed to save watch history:', historyErr);
+                }
+
+                const redirectUrl = `https://www.playimdb.com/title/${details.imdb_id}/`;
+                window.location.href = redirectUrl;
+            } else {
+                alert('Sorry, no IMDb streaming link is available for this movie!');
             }
         } else {
-            alert('Sorry, no trailer video is available for this movie!');
+            // User is not logged in -> play trailer as a fallback
+            let videoKey = null;
+            if (details && details.videos && details.videos.results) {
+                const trailer = details.videos.results.find(v => v.site === 'YouTube' && v.type === 'Trailer');
+                if (trailer) {
+                    videoKey = trailer.key;
+                } else if (details.videos.results.length > 0) {
+                    const anyYoutube = details.videos.results.find(v => v.site === 'YouTube');
+                    if (anyYoutube) videoKey = anyYoutube.key;
+                }
+            }
+            
+            if (videoKey) {
+                if (elements.videoPlayer && elements.videoModal) {
+                    elements.videoPlayer.src = `https://www.youtube.com/embed/${videoKey}?autoplay=1`;
+                    elements.videoModal.classList.add('active');
+                }
+            } else {
+                alert('Please register or login to watch this movie! (No trailer video is available either)');
+            }
         }
     } catch (error) {
-        console.error('Error fetching trailer:', error);
+        console.error('Error handling movie watch/trailer action:', error);
         elements.loading.classList.remove('active');
-        alert('Failed to load movie trailer.');
+        alert('Failed to load movie details.');
     }
 }
 
@@ -938,7 +1040,7 @@ function toggleFavorite(movie) {
         return;
     }
 
-    const index = state.favorites.findIndex(fav => fav.id === movie.id);
+    const index = state.favorites.findIndex(fav => Number(fav.id) === Number(movie.id));
     if (index > -1) {
         removeFromWatchlist(movie.id);
     } else {
@@ -950,15 +1052,27 @@ async function addToWatchlist(movie) {
     if (!state.isAuthenticated) return;
     try {
         const movieItem = {
-            id: movie.id,
+            movie_id: movie.id,
             title: movie.title,
             poster_path: movie.poster_path,
             vote_average: movie.vote_average,
             release_date: movie.release_date
         };
-        state.favorites.push(movieItem);
-        localStorage.setItem(`cinemahub_favorites_${state.username}`, JSON.stringify(state.favorites));
-        updateFavoriteCount();
+        const response = await fetch('index.php?action=add_favorite', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(movieItem)
+        });
+        const result = await response.json();
+        if (result.success) {
+            movieItem.id = movie.id; // align property name with UI matching
+            state.favorites.push(movieItem);
+            updateFavoriteCount();
+        } else {
+            console.error('Failed to add favorite to database:', result.message);
+        }
     } catch (error) {
         console.error('Error adding to watchlist:', error);
     }
@@ -967,9 +1081,20 @@ async function addToWatchlist(movie) {
 async function removeFromWatchlist(movieId) {
     if (!state.isAuthenticated) return;
     try {
-        state.favorites = state.favorites.filter(fav => fav.id !== movieId);
-        localStorage.setItem(`cinemahub_favorites_${state.username}`, JSON.stringify(state.favorites));
-        updateFavoriteCount();
+        const response = await fetch('index.php?action=remove_favorite', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ movie_id: movieId })
+        });
+        const result = await response.json();
+        if (result.success) {
+            state.favorites = state.favorites.filter(fav => Number(fav.id) !== Number(movieId));
+            updateFavoriteCount();
+        } else {
+            console.error('Failed to remove favorite from database:', result.message);
+        }
     } catch (error) {
         console.error('Error removing from watchlist:', error);
     }
@@ -1020,7 +1145,7 @@ function displayFavorites() {
 }
 
 async function removeFavorite(movieId) {
-    if (state.isAuthenticated && state.jwtToken) {
+    if (state.isAuthenticated) {
         await removeFromWatchlist(movieId);
         displayFavorites();
     }

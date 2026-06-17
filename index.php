@@ -1,4 +1,292 @@
-<!DOCTYPE html>
+<?php
+session_start();
+
+// Silent Database Auto-initialization
+$host = 'localhost';
+$db_user = 'root';
+$db_pass = '';
+$db_name = 'cinemahub';
+$db_error = null;
+
+try {
+    // Connect to MySQL server first without database to check/create it
+    $pdo = new PDO("mysql:host=$host;charset=utf8mb4", $db_user, $db_pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+    ]);
+    
+    // Create database if not exists
+    $pdo->exec("CREATE DATABASE IF NOT EXISTS `$db_name` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+    
+    // Connect to the database
+    $pdo->exec("USE `$db_name`");
+    
+    // Create users table if not exists
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `users` (
+        `id` INT AUTO_INCREMENT PRIMARY KEY,
+        `username` VARCHAR(50) NOT NULL UNIQUE,
+        `email` VARCHAR(100) NOT NULL UNIQUE,
+        `password` VARCHAR(255) NOT NULL,
+        `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+    // Create favorites table if not exists
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `favorites` (
+        `id` INT AUTO_INCREMENT PRIMARY KEY,
+        `user_id` INT NOT NULL,
+        `movie_id` INT NOT NULL,
+        `title` VARCHAR(255) NOT NULL,
+        `poster_path` VARCHAR(255),
+        `vote_average` DECIMAL(3,1),
+        `release_date` VARCHAR(50),
+        `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY `user_movie` (`user_id`, `movie_id`),
+        FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+    // Create watch_history table if not exists
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `watch_history` (
+        `id` INT AUTO_INCREMENT PRIMARY KEY,
+        `user_id` INT NOT NULL,
+        `movie_id` INT NOT NULL,
+        `title` VARCHAR(255) NOT NULL,
+        `poster_path` VARCHAR(255),
+        `vote_average` DECIMAL(3,1),
+        `release_date` VARCHAR(50),
+        `watched_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY `user_watch` (`user_id`, `movie_id`),
+        FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+} catch (PDOException $e) {
+    $db_error = $e->getMessage();
+}
+
+// API Endpoint Actions
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json');
+    if ($db_error) {
+        echo json_encode(['success' => false, 'message' => 'Database connection failed: ' . $db_error]);
+        exit;
+    }
+
+    $inputData = json_decode(file_get_contents('php://input'), true);
+    $action = $_GET['action'];
+
+    if ($action === 'register') {
+        $username = trim($inputData['username'] ?? '');
+        $email = trim($inputData['email'] ?? '');
+        $password = $inputData['password'] ?? '';
+
+        if (empty($username) || empty($email) || empty($password)) {
+            echo json_encode(['success' => false, 'message' => 'All fields are required.']);
+            exit;
+        }
+
+        // Validate email format
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid email address format.']);
+            exit;
+        }
+
+        // Validate password format (At least 8 characters, at least one letter, at least one number)
+        if (!preg_match('/^(?=.*[A-Za-z])(?=.*\d).{8,}$/', $password)) {
+            echo json_encode(['success' => false, 'message' => 'Password must be at least 8 characters long and contain both letters and numbers.']);
+            exit;
+        }
+
+        try {
+            // Check duplicate username or email
+            $stmt = $pdo->prepare("SELECT id, username, email FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)");
+            $stmt->execute([$username, $email]);
+            $existing = $stmt->fetch();
+
+            if ($existing) {
+                if (strtolower($existing['username']) === strtolower($username)) {
+                    echo json_encode(['success' => false, 'message' => 'Username is already taken.']);
+                } else {
+                    echo json_encode(['success' => false, 'message' => 'Email is already registered.']);
+                }
+                exit;
+            }
+
+            // Secure password hash
+            $hashedPassword = password_hash($password, PASSWORD_DEFAULT);
+            
+            // Insert user into DB
+            $insertStmt = $pdo->prepare("INSERT INTO users (username, email, password) VALUES (?, ?, ?)");
+            $insertStmt->execute([$username, $email, $hashedPassword]);
+            
+            $userId = $pdo->lastInsertId();
+            $_SESSION['user_id'] = $userId;
+            $_SESSION['username'] = $username;
+
+            // Create mock session token
+            $token = bin2hex(random_bytes(16));
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Registration successful.',
+                'username' => $username,
+                'token' => $token
+            ]);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error during registration: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'login') {
+        $username = trim($inputData['username'] ?? '');
+        $password = $inputData['password'] ?? '';
+
+        if (empty($username) || empty($password)) {
+            echo json_encode(['success' => false, 'message' => 'Username and password are required.']);
+            exit;
+        }
+
+        try {
+            // Fetch user by username
+            $stmt = $pdo->prepare("SELECT id, username, password FROM users WHERE LOWER(username) = LOWER(?)");
+            $stmt->execute([$username]);
+            $user = $stmt->fetch();
+
+            if ($user && password_verify($password, $user['password'])) {
+                $_SESSION['user_id'] = $user['id'];
+                $_SESSION['username'] = $user['username'];
+
+                // Create mock session token
+                $token = bin2hex(random_bytes(16));
+                echo json_encode([
+                    'success' => true,
+                    'message' => 'Login successful.',
+                    'username' => $user['username'],
+                    'token' => $token
+                ]);
+            } else {
+                echo json_encode(['success' => false, 'message' => 'Invalid username or password.']);
+            }
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error during login: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'logout') {
+        session_unset();
+        session_destroy();
+        echo json_encode(['success' => true, 'message' => 'Logged out successfully.']);
+        exit;
+    } elseif ($action === 'get_favorites') {
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+            exit;
+        }
+        try {
+            $stmt = $pdo->prepare("SELECT movie_id AS id, title, poster_path, vote_average, release_date FROM favorites WHERE user_id = ? ORDER BY created_at DESC");
+            $stmt->execute([$_SESSION['user_id']]);
+            $favorites = $stmt->fetchAll();
+            echo json_encode(['success' => true, 'favorites' => $favorites]);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error fetching favorites: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'add_favorite') {
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+            exit;
+        }
+        $movie_id = intval($inputData['movie_id'] ?? 0);
+        $title = trim($inputData['title'] ?? '');
+        $poster_path = trim($inputData['poster_path'] ?? '');
+        $vote_average = floatval($inputData['vote_average'] ?? 0);
+        $release_date = trim($inputData['release_date'] ?? '');
+
+        if ($movie_id <= 0 || empty($title)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid movie details.']);
+            exit;
+        }
+
+        try {
+            $stmt = $pdo->prepare("INSERT INTO favorites (user_id, movie_id, title, poster_path, vote_average, release_date) 
+                                   VALUES (?, ?, ?, ?, ?, ?) 
+                                   ON DUPLICATE KEY UPDATE title = VALUES(title)");
+            $stmt->execute([$_SESSION['user_id'], $movie_id, $title, $poster_path, $vote_average, $release_date]);
+            echo json_encode(['success' => true, 'message' => 'Favorite added successfully.']);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error adding favorite: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'remove_favorite') {
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+            exit;
+        }
+        $movie_id = intval($inputData['movie_id'] ?? 0);
+
+        if ($movie_id <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Invalid movie ID.']);
+            exit;
+        }
+
+        try {
+            $stmt = $pdo->prepare("DELETE FROM favorites WHERE user_id = ? AND movie_id = ?");
+            $stmt->execute([$_SESSION['user_id'], $movie_id]);
+            echo json_encode(['success' => true, 'message' => 'Favorite removed successfully.']);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error removing favorite: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'add_watch_history') {
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+            exit;
+        }
+        $movie_id = intval($inputData['movie_id'] ?? 0);
+        $title = trim($inputData['title'] ?? '');
+        $poster_path = trim($inputData['poster_path'] ?? '');
+        $vote_average = floatval($inputData['vote_average'] ?? 0);
+        $release_date = trim($inputData['release_date'] ?? '');
+
+        if ($movie_id <= 0 || empty($title)) {
+            echo json_encode(['success' => false, 'message' => 'Invalid movie details.']);
+            exit;
+        }
+
+        try {
+            $stmt = $pdo->prepare("INSERT INTO watch_history (user_id, movie_id, title, poster_path, vote_average, release_date) 
+                                   VALUES (?, ?, ?, ?, ?, ?) 
+                                   ON DUPLICATE KEY UPDATE watched_at = CURRENT_TIMESTAMP");
+            $stmt->execute([$_SESSION['user_id'], $movie_id, $title, $poster_path, $vote_average, $release_date]);
+            echo json_encode(['success' => true, 'message' => 'Watch history saved successfully.']);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error saving watch history: ' . $e->getMessage()]);
+            exit;
+        }
+    } elseif ($action === 'get_watch_history') {
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Unauthorized.']);
+            exit;
+        }
+        try {
+            $stmt = $pdo->prepare("SELECT movie_id AS id, title, poster_path, vote_average, release_date FROM watch_history WHERE user_id = ? ORDER BY watched_at DESC");
+            $stmt->execute([$_SESSION['user_id']]);
+            $history = $stmt->fetchAll();
+            echo json_encode(['success' => true, 'watchHistory' => $history]);
+            exit;
+        } catch (PDOException $e) {
+            echo json_encode(['success' => false, 'message' => 'Database error fetching watch history: ' . $e->getMessage()]);
+            exit;
+        }
+    } else {
+        echo json_encode(['success' => false, 'message' => 'Invalid action.']);
+        exit;
+    }
+}
+?><!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
